@@ -1,199 +1,238 @@
-import React, { useRef, useEffect, useState } from 'react';
+
+import React, { useRef, useEffect, useState, useCallback } from 'react';
+import { ZoomIn, ZoomOut, Maximize, Move, Hand } from 'lucide-react';
+import { ImageAdjustments, Layer } from '../types';
 
 interface EditorCanvasProps {
-  imageSrc: string;
-  mode: 'VIEW' | 'BRUSH';
+  layers: Layer[];
+  activeLayerId: string | null;
+  tool: string;
   brushSize?: number;
-  onMaskChange?: (paths: { x: number, y: number }[][]) => void;
-  onDimensionsCalculated?: (dims: { width: number, height: number, scale: number, offsetX: number, offsetY: number }) => void;
+  adjustments: ImageAdjustments;
+  onMaskChange: (paths: { x: number, y: number }[][]) => void;
+  maskPaths: { x: number, y: number }[][];
 }
 
 export const EditorCanvas: React.FC<EditorCanvasProps> = ({ 
-  imageSrc, 
-  mode, 
+  layers, 
+  activeLayerId,
+  tool, 
   brushSize = 40,
+  adjustments,
   onMaskChange,
-  onDimensionsCalculated
+  maskPaths
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  
+  // Transform State
+  const [transform, setTransform] = useState({ k: 1, x: 0, y: 0 }); // k=zoom, x/y=pan
+  const [isPanning, setIsPanning] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
-  
-  // These store the drawing paths in "Image Coordinates" (not screen coordinates)
-  const [paths, setPaths] = useState<{ x: number, y: number }[][]>([]);
+  const [lastPos, setLastPos] = useState({ x: 0, y: 0 });
   const [currentPath, setCurrentPath] = useState<{ x: number, y: number }[]>([]);
-  
-  // Store layout metrics to map mouse events to image pixels
-  const [layout, setLayout] = useState({ scale: 1, offsetX: 0, offsetY: 0, drawWidth: 0, drawHeight: 0 });
 
-  // 1. Initial Render & Resize Logic
+  // Initialize View (Fit to Screen)
   useEffect(() => {
+    const bgLayer = layers.find(l => l.type === 'IMAGE');
+    if (bgLayer && containerRef.current && transform.k === 1 && transform.x === 0) {
+      const img = new Image();
+      img.src = bgLayer.data;
+      img.onload = () => {
+        if (!containerRef.current) return;
+        const { clientWidth: cw, clientHeight: ch } = containerRef.current;
+        const scale = Math.min((cw - 100) / img.width, (ch - 100) / img.height);
+        const x = (cw - img.width * scale) / 2;
+        const y = (ch - img.height * scale) / 2;
+        setTransform({ k: scale, x, y });
+      };
+    }
+  }, [layers]); // Run when layers change, but check if transform is default
+
+  // Rendering Loop
+  const render = useCallback(() => {
     const canvas = canvasRef.current;
-    const container = containerRef.current;
-    if (!canvas || !container) return;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx || !containerRef.current) return;
 
-    const img = new Image();
-    img.src = imageSrc;
-    img.onload = () => {
-      // Container dimensions
-      const cw = container.clientWidth;
-      const ch = container.clientHeight;
+    // Handle High DPI
+    const dpr = window.devicePixelRatio || 1;
+    const rect = containerRef.current.getBoundingClientRect();
+    
+    // Resize logic
+    if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      canvas.style.width = `${rect.width}px`;
+      canvas.style.height = `${rect.height}px`;
+    }
+    
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, rect.width, rect.height);
 
-      // Calculate "contain" fit
-      const scale = Math.min(cw / img.width, ch / img.height);
-      const drawWidth = img.width * scale;
-      const drawHeight = img.height * scale;
-      
-      // Center the image
-      const offsetX = (cw - drawWidth) / 2;
-      const offsetY = (ch - drawHeight) / 2;
+    // Checkerboard Background
+    drawCheckerboard(ctx, rect.width, rect.height);
 
-      // Update canvas resolution to match container (crisp rendering)
-      canvas.width = cw;
-      canvas.height = ch;
+    // Apply Transformation (Zoom/Pan)
+    ctx.translate(transform.x, transform.y);
+    ctx.scale(transform.k, transform.k);
 
-      const newLayout = { scale, offsetX, offsetY, drawWidth, drawHeight };
-      setLayout(newLayout);
-      if (onDimensionsCalculated) {
-          onDimensionsCalculated({ width: img.width, height: img.height, ...newLayout });
-      }
+    // Draw Layers
+    [...layers].reverse().forEach(layer => {
+        if (!layer.visible) return;
 
-      // Draw immediately
-      renderCanvas(canvas, img, newLayout, paths, currentPath);
-    };
-  }, [imageSrc, containerRef.current?.clientWidth, containerRef.current?.clientHeight]);
+        if (layer.type === 'IMAGE') {
+            const img = new Image();
+            img.src = layer.data;
+            if (img.complete) {
+                ctx.save();
+                ctx.globalAlpha = layer.opacity;
+                // Apply Image Adjustments globally (simplified for demo)
+                // In a real app, adjustments might be layer-specific filters
+                if (layer.id === activeLayerId) {
+                   ctx.filter = `brightness(${adjustments.brightness}%) contrast(${adjustments.contrast}%) saturate(${adjustments.saturation}%) blur(${adjustments.blur}px)`;
+                }
+                ctx.drawImage(img, 0, 0);
+                ctx.restore();
+            }
+        }
+    });
 
-  // 2. Render Loop (updates on path changes)
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || layout.scale === 0) return;
-
-    const img = new Image();
-    img.src = imageSrc;
-    // We assume image is loaded since we calculated layout from it, 
-    // but in a real app might need to cache the image object to avoid reload flicker.
-    // For this implementation, browser cache usually handles it fast enough.
-    img.onload = () => renderCanvas(canvas, img, layout, paths, currentPath);
-    if (img.complete) renderCanvas(canvas, img, layout, paths, currentPath);
-
-  }, [paths, currentPath, layout, imageSrc]);
-
-  const renderCanvas = (
-    canvas: HTMLCanvasElement, 
-    img: HTMLImageElement, 
-    layout: any, 
-    savedPaths: any[], 
-    activePath: any[]
-  ) => {
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    // Clear
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    // Draw Image (Centered & Scaled)
-    ctx.drawImage(img, layout.offsetX, layout.offsetY, layout.drawWidth, layout.drawHeight);
-
-    // Draw Mask
-    // CRITICAL: We need to scale the brush strokes visually to match the image scale
-    if (savedPaths.length > 0 || activePath.length > 0) {
+    // Draw Mask Overlay
+    if (maskPaths.length > 0 || currentPath.length > 0) {
         ctx.save();
-        ctx.beginPath();
-        // Clip to image area so we don't draw on the background
-        ctx.rect(layout.offsetX, layout.offsetY, layout.drawWidth, layout.drawHeight);
-        ctx.clip();
-
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
-        ctx.lineWidth = brushSize * layout.scale; // Scale brush size visually
-        ctx.strokeStyle = 'rgba(255, 50, 50, 0.6)'; // Red mask
+        // Calculate dynamic line width based on zoom to keep brush constant relative to image
+        ctx.lineWidth = brushSize; 
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.5)'; // Red semi-transparent
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
 
-        [...savedPaths, activePath].forEach(path => {
+        [...maskPaths, currentPath].forEach(path => {
             if (path.length < 1) return;
             ctx.beginPath();
-            // Transform Image Coordinates -> Screen Coordinates
-            const startX = (path[0].x * layout.scale) + layout.offsetX;
-            const startY = (path[0].y * layout.scale) + layout.offsetY;
-            ctx.moveTo(startX, startY);
-
+            ctx.moveTo(path[0].x, path[0].y);
             for (let i = 1; i < path.length; i++) {
-                const px = (path[i].x * layout.scale) + layout.offsetX;
-                const py = (path[i].y * layout.scale) + layout.offsetY;
-                ctx.lineTo(px, py);
+                ctx.lineTo(path[i].x, path[i].y);
             }
             ctx.stroke();
         });
         ctx.restore();
     }
+  }, [layers, transform, maskPaths, currentPath, adjustments, activeLayerId, brushSize]);
+
+  useEffect(() => {
+    let animationFrameId: number;
+    const loop = () => {
+      render();
+      animationFrameId = requestAnimationFrame(loop);
+    };
+    loop();
+    return () => cancelAnimationFrame(animationFrameId);
+  }, [render]);
+
+  // Utils
+  const drawCheckerboard = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
+    const size = 20;
+    ctx.fillStyle = '#1e293b'; // Slate 800
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = '#0f172a'; // Slate 900
+    for (let y = 0; y < h; y += size) {
+      for (let x = 0; x < w; x += size) {
+        if ((x / size + y / size) % 2 === 0) ctx.fillRect(x, y, size, size);
+      }
+    }
   };
 
-  const getCoordinates = (e: React.MouseEvent | React.TouchEvent) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-    
-    const rect = canvas.getBoundingClientRect();
-    let clientX, clientY;
+  const getImgCoordinates = (clientX: number, clientY: number) => {
+    if (!containerRef.current) return { x: 0, y: 0 };
+    const rect = containerRef.current.getBoundingClientRect();
+    const x = (clientX - rect.left - transform.x) / transform.k;
+    const y = (clientY - rect.top - transform.y) / transform.k;
+    return { x, y };
+  };
 
-    if ('touches' in e) {
-      clientX = e.touches[0].clientX;
-      clientY = e.touches[0].clientY;
+  // Event Handlers
+  const handleWheel = (e: React.WheelEvent) => {
+    if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const zoomSensitivity = 0.001;
+        const newZoom = Math.max(0.1, Math.min(5, transform.k - e.deltaY * zoomSensitivity));
+        
+        // Zoom towards mouse pointer logic could go here, staying simple for now
+        setTransform(prev => ({ ...prev, k: newZoom }));
     } else {
-      clientX = (e as React.MouseEvent).clientX;
-      clientY = (e as React.MouseEvent).clientY;
+        // Pan
+        setTransform(prev => ({ ...prev, x: prev.x - e.deltaX, y: prev.y - e.deltaY }));
+    }
+  };
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    // Middle click or Space+Click (simulated by tool)
+    if (e.button === 1 || tool === 'SELECT') {
+        setIsPanning(true);
+        setLastPos({ x: e.clientX, y: e.clientY });
+        return;
+    }
+    
+    if (tool === 'MAGIC_EDIT' || tool === 'REPLACE_BG') {
+        setIsDrawing(true);
+        const coords = getImgCoordinates(e.clientX, e.clientY);
+        setCurrentPath([coords]);
+    }
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (isPanning) {
+        const dx = e.clientX - lastPos.x;
+        const dy = e.clientY - lastPos.y;
+        setTransform(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+        setLastPos({ x: e.clientX, y: e.clientY });
+        return;
     }
 
-    // Screen Coords relative to Canvas
-    const screenX = clientX - rect.left;
-    const screenY = clientY - rect.top;
-
-    // Map to Image Coords
-    // (ScreenX - OffsetX) / Scale = ImageX
-    const imageX = (screenX - layout.offsetX) / layout.scale;
-    const imageY = (screenY - layout.offsetY) / layout.scale;
-
-    return { x: imageX, y: imageY };
+    if (isDrawing) {
+        const coords = getImgCoordinates(e.clientX, e.clientY);
+        setCurrentPath(prev => [...prev, coords]);
+    }
   };
 
-  const startDrawing = (e: React.MouseEvent | React.TouchEvent) => {
-    if (mode !== 'BRUSH') return;
-    setIsDrawing(true);
-    const coords = getCoordinates(e);
-    if(coords) setCurrentPath([coords]);
-  };
-
-  const draw = (e: React.MouseEvent | React.TouchEvent) => {
-    if (!isDrawing || mode !== 'BRUSH') return;
-    const coords = getCoordinates(e);
-    if(coords) setCurrentPath(prev => [...prev, coords]);
-  };
-
-  const stopDrawing = () => {
-    if (!isDrawing) return;
-    setIsDrawing(false);
-    const newPaths = [...paths, currentPath];
-    setPaths(newPaths);
-    setCurrentPath([]);
-    if (onMaskChange) onMaskChange(newPaths);
+  const handleMouseUp = () => {
+    setIsPanning(false);
+    if (isDrawing) {
+        setIsDrawing(false);
+        if (currentPath.length > 0) {
+            onMaskChange([...maskPaths, currentPath]);
+        }
+        setCurrentPath([]);
+    }
   };
 
   return (
-    <div ref={containerRef} className="w-full h-full relative overflow-hidden bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] bg-slate-900 rounded-lg">
-       <canvas 
-         ref={canvasRef}
-         onMouseDown={startDrawing}
-         onMouseMove={draw}
-         onMouseUp={stopDrawing}
-         onMouseLeave={stopDrawing}
-         onTouchStart={startDrawing}
-         onTouchMove={draw}
-         onTouchEnd={stopDrawing}
-         className={`block touch-none ${mode === 'BRUSH' ? 'cursor-crosshair' : 'cursor-default'}`}
-       />
-       {mode === 'BRUSH' && (
-         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-black/60 backdrop-blur-md text-white px-4 py-2 rounded-full text-xs font-medium border border-white/10 pointer-events-none select-none">
-           🖌️ Paint Mask
-         </div>
-       )}
+    <div 
+        ref={containerRef} 
+        className={`w-full h-full relative overflow-hidden bg-slate-950 select-none ${tool === 'SELECT' ? 'cursor-grab' : isPanning ? 'cursor-grabbing' : 'cursor-crosshair'}`}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        onContextMenu={e => e.preventDefault()}
+    >
+      <canvas ref={canvasRef} className="block" />
+      
+      {/* HUD Info */}
+      <div className="absolute bottom-4 left-4 bg-slate-900/80 backdrop-blur text-xs text-slate-400 px-3 py-1.5 rounded-full border border-slate-700 pointer-events-none">
+          {Math.round(transform.k * 100)}% Zoom
+      </div>
+      
+      {/* Quick Controls */}
+      <div className="absolute bottom-4 right-4 flex flex-col gap-2">
+         <button onClick={() => setTransform({k: 1, x: 0, y: 0})} className="p-2 bg-slate-800 text-white rounded-lg hover:bg-slate-700 shadow-lg border border-slate-700">
+             <Maximize size={16} />
+         </button>
+      </div>
     </div>
   );
 };

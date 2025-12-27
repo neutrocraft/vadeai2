@@ -1,3 +1,4 @@
+
 /**
  * Scans image pixel data to find the bounding box of the non-transparent subject.
  */
@@ -167,5 +168,47 @@ export const createThumbnail = async (base64Image: string): Promise<string> => {
             resolve(canvas.toDataURL('image/jpeg', 0.7));
         };
         img.onerror = () => resolve('');
+    });
+};
+
+/**
+ * Resizes and optimizes image for AI processing to avoid payload limits and reduce latency.
+ */
+export const optimizeImageForAi = async (base64Image: string, maxSize = 1024): Promise<string> => {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.src = base64Image;
+        img.onload = () => {
+            let width = img.width;
+            let height = img.height;
+
+            // Calculate new dimensions if image is larger than maxSize
+            if (width > maxSize || height > maxSize) {
+                if (width > height) {
+                    height *= maxSize / width;
+                    width = maxSize;
+                } else {
+                    width *= maxSize / height;
+                    height = maxSize;
+                }
+            } else {
+                // If smaller, return original to maintain quality
+                resolve(base64Image);
+                return;
+            }
+
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            
+            // High quality scaling
+            ctx && (ctx.imageSmoothingQuality = 'high');
+            ctx?.drawImage(img, 0, 0, width, height);
+            
+            // Return as JPEG 0.9 for efficient transfer
+            resolve(canvas.toDataURL('image/jpeg', 0.9));
+        };
+        img.onerror = () => resolve(base64Image); // Fallback to original
     });
 };
