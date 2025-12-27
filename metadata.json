@@ -1,0 +1,5 @@
+{
+  "name": "Lumina AI Studio",
+  "description": "A professional, AI-powered image editing SaaS platform offering background removal, generative editing, and image enhancement using Gemini 2.5 models.",
+  "requestFramePermissions": []
+}
